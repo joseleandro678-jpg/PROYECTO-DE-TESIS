@@ -217,7 +217,9 @@ static void buttonsInit() {
   }
 }
 
-static void onButtonPressed(const String& code) {
+static void onButtonPressed(const String& code, uint8_t pin) {
+  Serial.printf("[BTN] GPIO %u -> %s\n", pin, code.c_str());
+
   if (code == "START" || code == "CANCEL") {
     pushEvent(code);
     return;
@@ -256,7 +258,7 @@ static void pollButtons() {
 
       // flanco de presión: HIGH -> LOW
       if (b.stable == LOW) {
-        onButtonPressed(String(b.code));
+        onButtonPressed(String(b.code), b.pin);
       }
     }
   }
@@ -278,9 +280,12 @@ static void apiStatePost() {
   const String body = server.arg("plain");
 
   // ArduinoJson v6: usar DynamicJsonDocument / StaticJsonDocument
-  DynamicJsonDocument doc(4096);
+  size_t cap = body.length() * 2 + 2048;
+  if (cap > 96000) cap = 96000;
+  DynamicJsonDocument doc(cap);
   DeserializationError err = deserializeJson(doc, body);
   if (err) {
+    Serial.printf("[API] /api/state JSON error: %s (len=%u)\n", err.c_str(), body.length());
     server.send(400, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"invalid json\"}");
     return;
   }
@@ -328,6 +333,18 @@ static void setupWiFi() {
 
   WiFiManager wm;
   wm.setDebugOutput(true);
+
+  // Mantener CANCELAR (rojo lateral) apretado al encender ~3 s => borra WiFi guardado
+  pinMode(PIN_BTN_CANCEL, INPUT_PULLUP);
+  if (digitalRead(PIN_BTN_CANCEL) == LOW) {
+    uint32_t t0 = millis();
+    while (digitalRead(PIN_BTN_CANCEL) == LOW && millis() - t0 < 3000) delay(10);
+    if (millis() - t0 >= 3000) {
+      Serial.println("[WiFi] CANCELAR mantenido: borrando credenciales WiFi guardadas.");
+      toneMs(900, 120); toneMs(600, 200);
+      wm.resetSettings();
+    }
+  }
 
   const String apSsid = buildApSsid();   // ARCADE-QUIZxxxx
   // AP sin password
@@ -392,4 +409,16 @@ void setup() {
 void loop() {
   server.handleClient();
   pollButtons();
+
+  static uint32_t lastInfo = 0;
+  if (millis() - lastInfo > 10000) {
+    lastInfo = millis();
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.printf("[INFO] Abrir: http://%s.local/  o  http://%s/\n",
+                    MDNS_NAME, WiFi.localIP().toString().c_str());
+    } else {
+      Serial.printf("[INFO] Sin WiFi. Conectate a la red %s para configurarlo.\n",
+                    buildApSsid().c_str());
+    }
+  }
 }
