@@ -5,15 +5,19 @@
   <title>Quiz Multiple Choice - ESP32 / Web</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-  <!-- SweetAlert2: local (ESP32) -->
+  <!-- SweetAlert2 v11.26.25: local (ESP32, sin internet).
+       Se guarda como sweetalert2.all.min.js.gz y el ESP32 lo sirve comprimido.
+       Si no esta disponible (p. ej. abriendo el HTML fuera del ESP32), se usa el CDN. -->
   <script src="sweetalert2.all.min.js"></script>
-  <!-- SweetAlert2: CDN (modo online / hosting) -->
-  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.all.min.js"></script>
+  <script>
+    window.Swal || document.write('<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11.26.25/dist/sweetalert2.all.min.js"><\/script>');
+  </script>
 
-  <!-- XLSX: local (ESP32) -->
+  <!-- XLSX (SheetJS) v0.18.5: local (ESP32), con respaldo CDN igual que arriba -->
   <script src="xlsx.full.min.js"></script>
-  <!-- XLSX: CDN (modo online / hosting) -->
-  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script>
+    window.XLSX || document.write('<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"><\/script>');
+  </script>
 
   <!-- CSS externo -->
   <link rel="stylesheet" href="style.css">

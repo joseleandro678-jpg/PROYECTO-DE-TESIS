@@ -80,13 +80,30 @@ static String contentType(const String& path) {
 static bool serveFile(const String& uri) {
   String p = uri;
   if (p == "/") p = "/index.html";
-  if (!LittleFS.exists(p)) return false;
 
-  File f = LittleFS.open(p, "r");
+  // Si no existe el archivo plano, se busca la version comprimida (.gz).
+  // Las librerias pesadas (SweetAlert2, XLSX) se guardan asi para ahorrar
+  // espacio en LittleFS; WebServer::streamFile agrega
+  // "Content-Encoding: gzip" automaticamente cuando el archivo termina en .gz
+  // y el navegador lo descomprime solo.
+  String fsPath = p;
+  bool gz = false;
+  if (!LittleFS.exists(fsPath)) {
+    fsPath = p + ".gz";
+    if (!LittleFS.exists(fsPath)) return false;
+    gz = true;
+  }
+
+  File f = LittleFS.open(fsPath, "r");
   if (!f) return false;
 
-  sendNoCache();
-  server.streamFile(f, contentType(p));
+  if (gz) {
+    // Librerias de terceros: no cambian, se permite cache por 7 dias
+    server.sendHeader("Cache-Control", "public, max-age=604800");
+  } else {
+    sendNoCache();
+  }
+  server.streamFile(f, contentType(p));  // MIME segun el nombre original
   f.close();
   return true;
 }
