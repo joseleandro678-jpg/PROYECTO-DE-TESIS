@@ -17,6 +17,14 @@
 // =====================================================
 static const char* MDNS_NAME = "arcadequiz";      // http://arcadequiz.local/
 static const char* STATE_FILE = "/state.json";
+static const char* STATE_TMP  = "/state.tmp";   // escritura atómica: tmp -> rename
+
+// Tamaño máximo del estado (config + preguntas + resultados) aceptado por POST.
+// El cuerpo HTTP queda en RAM dos veces (buffer del WebServer + copia local),
+// por eso se limita a 64 KB (~128 KB de heap en el pico).
+static const size_t MAX_STATE_BYTES = 64 * 1024;
+// Margen libre que se exige en LittleFS además del propio archivo.
+static const size_t FS_RESERVE_BYTES = 8 * 1024;
 
 // ---- Pines (AJUSTAR si tu cableado usa otros) ----
 // INPUT_PULLUP => pulsado = LOW
@@ -41,7 +49,8 @@ static const uint32_t ACCEPT_WINDOW_MS = 8000; // aceptar válido luego de elegi
 // GLOBALS
 // =====================================================
 WebServer server(80);
-static String g_stateJson = "{}";
+// El estado vive en LittleFS (STATE_FILE) y se sirve directamente desde ahí,
+// sin mantener una copia en RAM.
 
 // /api/last_button
 static volatile uint32_t g_eventId = 0;
@@ -77,15 +86,32 @@ static String contentType(const String& path) {
   return "text/plain; charset=utf-8";
 }
 
+// Sirve un archivo de LittleFS. Si no existe "<ruta>" pero sí "<ruta>.gz",
+// envía la versión comprimida: streamFile() agrega "Content-Encoding: gzip"
+// porque el nombre termina en .gz, y el navegador la descomprime.
+// Así las librerías grandes (SheetJS) ocupan ~1/3 de la flash.
 static bool serveFile(const String& uri) {
   String p = uri;
   if (p == "/") p = "/index.html";
-  if (!LittleFS.exists(p)) return false;
 
-  File f = LittleFS.open(p, "r");
+  String fsPath = p;
+  bool gz = false;
+  if (!LittleFS.exists(fsPath)) {
+    fsPath = p + ".gz";
+    if (!LittleFS.exists(fsPath)) return false;
+    gz = true;
+  }
+
+  File f = LittleFS.open(fsPath, "r");
   if (!f) return false;
 
-  sendNoCache();
+  if (gz) {
+    // Librerías de terceros con versión fija: se pueden cachear (1 semana)
+    // y así no se retransmiten al ESP32 en cada recarga de la página.
+    server.sendHeader("Cache-Control", "public, max-age=604800");
+  } else {
+    sendNoCache();
+  }
   server.streamFile(f, contentType(p));
   f.close();
   return true;
@@ -132,27 +158,47 @@ static String defaultStateJson() {
   return out;
 }
 
-static void loadState() {
-  if (!LittleFS.exists(STATE_FILE)) {
-    g_stateJson = defaultStateJson();
-    return;
+enum class SaveResult { Ok, NoSpace, WriteFailed };
+
+static SaveResult saveState(const String& json) {
+  // Espacio: durante la escritura conviven state.tmp (nuevo) y state.json (viejo).
+  const size_t total = LittleFS.totalBytes();
+  const size_t used  = LittleFS.usedBytes();
+  if (used + json.length() + FS_RESERVE_BYTES > total) {
+    return SaveResult::NoSpace;
   }
-  File f = LittleFS.open(STATE_FILE, "r");
-  if (!f) {
-    g_stateJson = defaultStateJson();
-    return;
-  }
-  String s = f.readString();
+
+  File f = LittleFS.open(STATE_TMP, "w");
+  if (!f) return SaveResult::WriteFailed;
+  const size_t written = f.print(json);
   f.close();
-  g_stateJson = (s.length() ? s : defaultStateJson());
+  if (written != json.length()) {
+    LittleFS.remove(STATE_TMP);
+    return SaveResult::WriteFailed;
+  }
+
+  // Reemplazo: si se corta la energía entre remove y rename,
+  // loadState() recupera state.tmp en el próximo arranque.
+  LittleFS.remove(STATE_FILE);
+  if (!LittleFS.rename(STATE_TMP, STATE_FILE)) return SaveResult::WriteFailed;
+  return SaveResult::Ok;
 }
 
-static bool saveState(const String& json) {
-  File f = LittleFS.open(STATE_FILE, "w");
-  if (!f) return false;
-  f.print(json);
-  f.close();
-  return true;
+static void loadState() {
+  // Recuperación de una escritura interrumpida
+  if (!LittleFS.exists(STATE_FILE) && LittleFS.exists(STATE_TMP)) {
+    LittleFS.rename(STATE_TMP, STATE_FILE);
+  }
+  // Primer arranque (o archivo vacío): crear estado por defecto
+  bool needDefault = !LittleFS.exists(STATE_FILE);
+  if (!needDefault) {
+    File f = LittleFS.open(STATE_FILE, "r");
+    needDefault = !f || f.size() == 0;
+    if (f) f.close();
+  }
+  if (needDefault) {
+    saveState(defaultStateJson());
+  }
 }
 
 // =====================================================
@@ -265,29 +311,82 @@ static void pollButtons() {
 // =====================================================
 // API
 // =====================================================
+static void sendJsonError(int code, const char* error) {
+  String out = String("{\"ok\":false,\"error\":\"") + error + "\"}";
+  server.send(code, "application/json; charset=utf-8", out);
+}
+
 static void apiStateGet() {
+  File f = LittleFS.open(STATE_FILE, "r");
+  if (!f) {
+    sendNoCache();
+    server.send(200, "application/json; charset=utf-8", defaultStateJson());
+    return;
+  }
   sendNoCache();
-  server.send(200, "application/json; charset=utf-8", g_stateJson);
+  server.streamFile(f, "application/json; charset=utf-8");
+  f.close();
+}
+
+// Valida el JSON recibido con memoria constante: el filtro conserva solo los
+// objetos chicos (teacherConfig, adminCreds) y descarta "questionsTxt" y
+// "results", que igualmente se recorren y se validan sintácticamente
+// (estructura, comillas, llaves y corchetes; las secuencias de escape dentro
+// de esos textos descartados no se verifican, cosa que JSON.stringify
+// nunca genera de forma inválida).
+// Antes se usaba un documento fijo de 4 KB, que fallaba (NoMemory) con
+// bancos de preguntas o listas de resultados grandes.
+static DeserializationError validateState(const String& body, DynamicJsonDocument& doc) {
+  StaticJsonDocument<128> filter;
+  filter["teacherConfig"] = true;
+  filter["adminCreds"] = true;
+
+  DeserializationError err =
+      deserializeJson(doc, body, DeserializationOption::Filter(filter));
+  if (err) return err;
+  if (!doc.is<JsonObject>()) return DeserializationError::InvalidInput;
+  return DeserializationError::Ok;
 }
 
 static void apiStatePost() {
   if (!server.hasArg("plain")) {
-    server.send(400, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"missing body\"}");
+    sendJsonError(400, "missing body");
     return;
   }
-  const String body = server.arg("plain");
-
-  // ArduinoJson v6: usar DynamicJsonDocument / StaticJsonDocument
-  DynamicJsonDocument doc(4096);
-  DeserializationError err = deserializeJson(doc, body);
-  if (err) {
-    server.send(400, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"invalid json\"}");
+  String body = server.arg("plain");
+  if (body.length() == 0) {
+    sendJsonError(400, "missing body");
+    return;
+  }
+  if (body.length() > MAX_STATE_BYTES) {
+    sendJsonError(413, "state too large");
     return;
   }
 
-  g_stateJson = body;
-  const bool ok = saveState(body);
-  server.send(200, "application/json; charset=utf-8", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+  {
+    DynamicJsonDocument doc(2048);
+    DeserializationError err = validateState(body, doc);
+    if (err) {
+      Serial.printf("[STATE] JSON rechazado (%u bytes): %s\n",
+                    (unsigned)body.length(), err.c_str());
+      sendJsonError(400, err == DeserializationError::NoMemory ? "config too large" : "invalid json");
+      return;
+    }
+  }
+
+  switch (saveState(body)) {
+    case SaveResult::Ok:
+      server.send(200, "application/json; charset=utf-8", "{\"ok\":true}");
+      break;
+    case SaveResult::NoSpace:
+      Serial.printf("[STATE] Sin espacio en LittleFS para %u bytes\n", (unsigned)body.length());
+      sendJsonError(507, "no space");
+      break;
+    default:
+      Serial.println("[STATE] Error al escribir state.json");
+      sendJsonError(500, "write failed");
+      break;
+  }
 }
 
 static void apiLastButton() {
@@ -351,7 +450,8 @@ void setup() {
   if (!LittleFS.begin(true)) {
     Serial.println("[FS] LittleFS mount FAILED");
   } else {
-    Serial.println("[FS] LittleFS OK");
+    Serial.printf("[FS] LittleFS OK (%u / %u bytes usados)\n",
+                  (unsigned)LittleFS.usedBytes(), (unsigned)LittleFS.totalBytes());
   }
 
   loadState();

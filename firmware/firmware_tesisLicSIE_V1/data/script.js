@@ -494,6 +494,38 @@ async function tryLoadStateFromEsp32() {
   }
 }
 
+// Debe coincidir con MAX_STATE_BYTES del firmware (src/main.cpp)
+const ESP32_MAX_STATE_BYTES = 64 * 1024;
+
+// Aviso no intrusivo (no usa SweetAlert para no cerrar ventanas abiertas)
+function showSyncWarning(msg) {
+  let el = document.getElementById("syncWarning");
+  if (!msg) {
+    if (el) el.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "syncWarning";
+    el.setAttribute("role", "status");
+    el.style.cssText =
+      "position:fixed;left:50%;bottom:12px;transform:translateX(-50%);" +
+      "max-width:min(92vw,640px);padding:10px 14px;border-radius:10px;" +
+      "background:#fff4e5;color:#7a3e00;border:1px solid #f0b36b;" +
+      "font-size:0.85rem;line-height:1.35;z-index:2000;box-shadow:0 4px 14px rgba(0,0,0,.15);";
+    document.body.appendChild(el);
+  }
+  el.textContent = "⚠️ " + msg;
+}
+
+const SYNC_ERROR_TEXT = {
+  "state too large": "los datos superan el tamaño máximo que admite el dispositivo",
+  "no space": "la memoria del dispositivo está llena",
+  "invalid json": "el dispositivo rechazó los datos",
+  "config too large": "la configuración del docente es demasiado grande",
+  "write failed": "falló la escritura en la memoria del dispositivo"
+};
+
 function persistStateToEsp32() {
   if (modoOperacion === "browser") return;
 
@@ -503,14 +535,45 @@ function persistStateToEsp32() {
     results,
     adminCreds
   };
+  const body = JSON.stringify(payload);
+  const sizeBytes = new Blob([body]).size;
+  const suffix =
+    " Los datos quedan guardados en este navegador; exporta los resultados a Excel" +
+    " o borra resultados antiguos para liberar espacio.";
+
+  if (sizeBytes > ESP32_MAX_STATE_BYTES) {
+    showSyncWarning(
+      `No se guardó en el ESP32: los datos ocupan ${Math.ceil(sizeBytes / 1024)} KB` +
+      ` (máximo ${ESP32_MAX_STATE_BYTES / 1024} KB).` + suffix
+    );
+    return;
+  }
 
   fetch("/api/state", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  }).catch(err => {
-    console.warn("No se pudo guardar /api/state:", err.message);
-  });
+    body
+  })
+    .then(async res => {
+      let data = null;
+      try { data = await res.json(); } catch (_) { /* respuesta no JSON */ }
+      if (res.ok && data && data.ok) {
+        showSyncWarning(null);
+        return;
+      }
+      // Modo "ambos" fuera del ESP32 (p. ej. hosting): no hay API, no avisar
+      if (!data && modoOperacion !== "esp32") return;
+      const code = (data && data.error) || `HTTP ${res.status}`;
+      showSyncWarning(
+        `No se guardó en el ESP32: ${SYNC_ERROR_TEXT[code] || code}.` + suffix
+      );
+    })
+    .catch(err => {
+      console.warn("No se pudo guardar /api/state:", err.message);
+      if (modoOperacion === "esp32") {
+        showSyncWarning("No hay conexión con el ESP32. Los cambios quedan guardados en este navegador.");
+      }
+    });
 }
 
 /************* RANDOM: SHUFFLE + SUBSET *************/
