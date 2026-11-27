@@ -11,6 +11,18 @@
 #include <ESPmDNS.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
+#if __has_include(<esp_mac.h>)
+#include <esp_mac.h>   // esp_read_mac en Arduino-ESP32 3.x
+#endif
+
+// Compatibilidad LEDC: Arduino-ESP32 2.x usa canal, 3.x usa pin
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  #define BUZZER_ATTACH()   ledcAttach(PIN_BUZZER, 2000, 8)
+  #define BUZZER_TONE(f)    ledcWriteTone(PIN_BUZZER, (f))
+#else
+  #define BUZZER_ATTACH()   ledcAttachPin(PIN_BUZZER, BUZZER_CH)
+  #define BUZZER_TONE(f)    ledcWriteTone(BUZZER_CH, (f))
+#endif
 
 // =====================================================
 // CONFIG
@@ -159,14 +171,14 @@ static bool saveState(const String& json) {
 // BUZZER (LEDC)
 // =====================================================
 static void buzzerInit() {
-  ledcAttachPin(PIN_BUZZER, BUZZER_CH);
-  ledcWriteTone(BUZZER_CH, 0);
+  BUZZER_ATTACH();
+  BUZZER_TONE(0);
 }
 
 static void toneMs(uint16_t freq, uint16_t ms) {
-  ledcWriteTone(BUZZER_CH, freq);
+  BUZZER_TONE(freq);
   delay(ms);
-  ledcWriteTone(BUZZER_CH, 0);
+  BUZZER_TONE(0);
   delay(15);
 }
 
