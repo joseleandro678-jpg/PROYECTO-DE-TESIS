@@ -277,6 +277,32 @@ static void pollButtons() {
 }
 
 // =====================================================
+// DIAGNÓSTICO: detecta botones conectados a pines no asignados
+// =====================================================
+static const uint8_t SCAN_PINS[] = { 2, 5, 12, 13, 15, 18, 19, 21, 22, 23 };
+static bool scanLast[sizeof(SCAN_PINS)];
+
+static void scanInit() {
+  for (size_t i = 0; i < sizeof(SCAN_PINS); i++) {
+    pinMode(SCAN_PINS[i], INPUT_PULLUP);
+    scanLast[i] = digitalRead(SCAN_PINS[i]);
+  }
+}
+
+static void scanPoll() {
+  static uint32_t last = 0;
+  if (millis() - last < 30) return;
+  last = millis();
+  for (size_t i = 0; i < sizeof(SCAN_PINS); i++) {
+    bool r = digitalRead(SCAN_PINS[i]);
+    if (r != scanLast[i]) {
+      scanLast[i] = r;
+      if (r == LOW) Serial.printf("[SCAN] Boton detectado en GPIO %u (no asignado)\n", SCAN_PINS[i]);
+    }
+  }
+}
+
+// =====================================================
 // API
 // =====================================================
 static void apiStateGet() {
@@ -385,6 +411,7 @@ void setup() {
 
   loadState();
   buttonsInit();
+  scanInit();
   buzzerInit();
 
   setupWiFi();
@@ -421,6 +448,7 @@ void setup() {
 void loop() {
   server.handleClient();
   pollButtons();
+  scanPoll();
 
   static uint32_t lastInfo = 0;
   if (millis() - lastInfo > 10000) {
