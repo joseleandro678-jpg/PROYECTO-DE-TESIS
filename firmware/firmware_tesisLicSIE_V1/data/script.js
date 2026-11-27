@@ -67,6 +67,60 @@ const btnShowResults = document.getElementById("btnShowResults");
 const btnEditConfig = document.getElementById("btnEditConfig");
 
 /************* UTILIDADES GENERALES *************/
+function escapeHtml(value) {
+  return String(value == null ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// Cambia entre pantalla de bienvenida ("idle") y pregunta ("running")
+function setAppState(state) {
+  body.setAttribute("data-state", state);
+  const nameEl = document.getElementById("student-name");
+  if (nameEl) {
+    nameEl.textContent =
+      state === "running" && currentStudent
+        ? `${currentStudent.nombre} ${currentStudent.apellido}`
+        : "Sin alumno";
+  }
+  if (state === "idle") {
+    const fill = document.getElementById("progress-fill");
+    if (fill) fill.style.width = "0%";
+    const timerBox = document.getElementById("timer-box");
+    if (timerBox) timerBox.classList.remove("is-warning", "is-danger");
+  }
+}
+
+function getOptionButtons() {
+  return Array.from(document.querySelectorAll(".option-btn"));
+}
+
+function clearOptionMarks() {
+  getOptionButtons().forEach(b =>
+    b.classList.remove("is-selected", "is-correct", "is-wrong", "is-dim")
+  );
+}
+
+function markSelectedOption(letter) {
+  clearOptionMarks();
+  if (!letter) return;
+  const btn = document.querySelector(`.option-btn[data-letter="${letter}"]`);
+  if (btn) btn.classList.add("is-selected");
+}
+
+function markAnswerResult(chosen, correct) {
+  getOptionButtons().forEach(b => {
+    const l = b.dataset.letter;
+    b.classList.remove("is-selected");
+    if (l === correct) b.classList.add("is-correct");
+    else if (l === chosen) b.classList.add("is-wrong");
+    else b.classList.add("is-dim");
+  });
+}
+
 function formatTime(seconds) {
   const m = String(Math.floor(seconds / 60)).padStart(2, "0");
   const s = String(seconds % 60).padStart(2, "0");
@@ -95,30 +149,47 @@ function loadScript(src) {
 }
 
 /************* MODO DE TRABAJO (ESP32 / BROWSER / BOTH) *************/
-function selectModeAtStartup() {
+async function selectModeAtStartup() {
   const saved = localStorage.getItem(MODE_KEY);
   if (saved === "esp32" || saved === "browser" || saved === "both") {
     modoOperacion = saved;
     return;
   }
 
-  const resp = window.prompt(
-    "Seleccionar modo de trabajo:\n" +
-      "1 - Solo ESP32 (offline, accediendo por AP del ESP32)\n" +
-      "2 - Solo Navegador (sin ESP32)\n" +
-      "3 - Ambos (usar con o sin ESP32)\n\n" +
-      "Ingresa 1, 2 o 3:",
-    "3"
-  );
+  const res = await Swal.fire({
+    title: "¿Cómo vas a usar el quiz?",
+    html: `
+      <div class="form">
+        <div class="segmented cols-3">
+          <label>
+            <input type="radio" name="appMode" value="both" checked>
+            <strong>Con o sin ESP32 (recomendado)</strong>
+            <small>Usa los botones físicos si el arcade está conectado.</small>
+          </label>
+          <label>
+            <input type="radio" name="appMode" value="esp32">
+            <strong>Solo ESP32</strong>
+            <small>Conectado a la red Wi-Fi del arcade, sin internet.</small>
+          </label>
+          <label>
+            <input type="radio" name="appMode" value="browser">
+            <strong>Solo navegador</strong>
+            <small>Sin arcade: se responde desde la pantalla.</small>
+          </label>
+        </div>
+      </div>
+    `,
+    confirmButtonText: "Continuar",
+    allowOutsideClick: false,
+    allowEscapeKey: false,
+    preConfirm: () => {
+      const sel = document.querySelector('input[name="appMode"]:checked');
+      return sel ? sel.value : "both";
+    }
+  });
 
-  if (resp === "1") {
-    modoOperacion = "esp32";
-  } else if (resp === "2") {
-    modoOperacion = "browser";
-  } else {
-    modoOperacion = "both";
-  }
-
+  const value = res && res.value;
+  modoOperacion = value === "esp32" || value === "browser" ? value : "both";
   localStorage.setItem(MODE_KEY, modoOperacion);
 }
 
@@ -152,25 +223,27 @@ function updateTimerDisplay() {
   const progressEl = document.getElementById("progress-text");
   if (!timerEl || !progressEl) return;
 
+  const timerBox = document.getElementById("timer-box");
+  const fill = document.getElementById("progress-fill");
+  const hasQuestions = questions && questions.length > 0;
+
   if (timerMode === "down") {
     const secs = Math.max(remainingSeconds, 0);
-    const timeStr = formatTime(secs);
-    timerEl.textContent = timeStr;
-    if (questions && questions.length > 0) {
-      progressEl.textContent =
-        `Tiempo restante: ${timeStr} | Pregunta ${currentQuestionIndex + 1} de ${questions.length}`;
-    } else {
-      progressEl.textContent = `Tiempo restante: ${timeStr}`;
+    timerEl.textContent = formatTime(secs);
+    if (timerBox) {
+      timerBox.classList.toggle("is-danger", quizInProgress && secs <= 30);
+      timerBox.classList.toggle("is-warning", quizInProgress && secs > 30 && secs <= 120);
     }
   } else {
-    const timeStr = formatTime(elapsedSeconds);
-    timerEl.textContent = timeStr;
-    if (questions && questions.length > 0) {
-      progressEl.textContent =
-        `Tiempo transcurrido: ${timeStr} | Pregunta ${currentQuestionIndex + 1} de ${questions.length}`;
-    } else {
-      progressEl.textContent = `Tiempo transcurrido: ${timeStr}`;
-    }
+    timerEl.textContent = formatTime(elapsedSeconds);
+    if (timerBox) timerBox.classList.remove("is-warning", "is-danger");
+  }
+
+  if (hasQuestions && quizInProgress) {
+    const label = timerMode === "down" ? "restante" : "transcurrido";
+    progressEl.textContent =
+      `Pregunta ${currentQuestionIndex + 1} de ${questions.length} · Tiempo ${label}`;
+    if (fill) fill.style.width = `${(currentQuestionIndex / questions.length) * 100}%`;
   }
 }
 
@@ -604,6 +677,14 @@ function loadQuestion() {
     return;
   }
 
+  clearOptionMarks();
+  const container = document.querySelector(".question-container");
+  if (container) {
+    container.classList.remove("swap");
+    void container.offsetWidth; // reinicia la animación
+    container.classList.add("swap");
+  }
+
   const q = questions[currentQuestionIndex];
   document.getElementById("question-number").textContent =
     `Pregunta ${currentQuestionIndex + 1} de ${questions.length}`;
@@ -644,11 +725,16 @@ function confirmAnswer(optionLetter) {
   // Sonido de buzzer según correcto/incorrecto
   playBuzzer(isCorrect ? "correcto" : "incorrecto");
 
+  markAnswerResult(optionLetter, q.correct);
+
+  const isLast = currentQuestionIndex >= questions.length - 1;
   Swal.fire({
-    title: isCorrect ? "Respuesta correcta" : "Respuesta incorrecta",
-    text: isCorrect ? "¡Muy bien!" : `La respuesta correcta era ${q.correct}.`,
+    title: isCorrect ? "¡Correcto!" : "Incorrecto",
+    html: isCorrect
+      ? "¡Muy bien! Seguí así."
+      : `La respuesta correcta era <strong>${escapeHtml(q.correct)}) ${escapeHtml(q.options[q.correct])}</strong>`,
     icon: isCorrect ? "success" : "error",
-    confirmButtonText: "Continuar"
+    confirmButtonText: isLast ? "Ver resultado" : "Siguiente pregunta"
   }).then(() => {
     goToNextQuestion();
   });
@@ -661,7 +747,7 @@ function confirmAnswer(optionLetter) {
  */
 function handleOptionClick(optionLetter) {
   if (!quizInProgress) {
-    Swal.fire("Atención", "Primero presiona Start para iniciar el evaluativo.", "info");
+    Swal.fire("Atención", "Primero presioná Comenzar para iniciar el evaluativo.", "info");
     return;
   }
 
@@ -672,21 +758,26 @@ function handleOptionClick(optionLetter) {
   }
 
   pendingConfirmOption = optionLetter;
+  markSelectedOption(optionLetter);
 
   // Mensaje incluye instrucción para uso con ESP32
   const extraMsg =
     modoOperacion === "browser"
       ? ""
-      : " (en modo ESP32, vuelve a presionar el mismo botón físico para confirmar).";
+      : `<div class="field-help" style="margin-top:.6rem">En el arcade: presioná otra vez el botón <strong>${optionLetter}</strong> para confirmar.</div>`;
 
   Swal.fire({
-    title: "Confirmar respuesta",
-    text: `¿Seguro que deseas marcar la opción ${optionLetter}?${extraMsg}`,
+    title: `¿Confirmás la opción ${optionLetter}?`,
+    html: `<strong>${escapeHtml(q.options[optionLetter])}</strong>${extraMsg}`,
     icon: "question",
     showCancelButton: true,
-    confirmButtonText: "Confirmar",
-    cancelButtonText: "Cancelar"
+    confirmButtonText: "Sí, confirmar",
+    cancelButtonText: "Cambiar",
+    reverseButtons: true
   }).then(result => {
+    if (!result.isConfirmed && pendingConfirmOption === optionLetter) {
+      clearOptionMarks();
+    }
     // Si pendingConfirmOption cambió por una pulsación física, no hacemos nada
     if (pendingConfirmOption !== null && pendingConfirmOption !== optionLetter) {
       return;
@@ -747,28 +838,37 @@ function finishQuiz(timeUp) {
     saveResultsToStorage();
   }
 
-  const baseMsg =
-    (currentStudent
-      ? currentStudent.nombre + " " + currentStudent.apellido + ", "
-      : "") +
-    `tu nota es ${grade}/10.\n` +
-    `Tiempo total: ${formatTime(totalSeconds)}.`;
+  setAppState("idle");
+  const fill = document.getElementById("progress-fill");
+  if (fill) fill.style.width = "100%";
+  document.getElementById("progress-text").textContent =
+    `Test finalizado · ${correctCount} de ${questions.length} correctas`;
+
+  const studentName = currentStudent
+    ? escapeHtml(currentStudent.nombre + " " + currentStudent.apellido)
+    : "";
 
   let title;
-  let icon;
-
   if (timeUp) {
-    title = passed ? "Tiempo agotado (aprobado)" : "Tiempo agotado";
-    icon = "warning";
+    title = passed ? "Tiempo agotado · ¡Aprobado!" : "Tiempo agotado";
   } else {
-    title = passed ? "Aprobado" : "Desaprobado";
-    icon = passed ? "success" : "error";
+    title = passed ? "¡Felicitaciones, aprobaste!" : "No alcanzó esta vez";
   }
+  const ringColor = passed ? "var(--success)" : "var(--danger)";
 
   Swal.fire({
     title,
-    text: baseMsg,
-    icon,
+    html: `
+      ${studentName ? `<div style="margin-bottom:.4rem">${studentName}</div>` : ""}
+      <div class="score-ring" style="--p:${grade * 10};--c:${ringColor}">
+        <div><b>${grade}</b><small>de 10</small></div>
+      </div>
+      <div class="score-meta">
+        <span>✔ ${correctCount}/${questions.length} correctas</span>
+        <span>⏱ ${formatTime(totalSeconds)}</span>
+        ${stars ? `<span class="stars">${stars}</span>` : ""}
+      </div>
+    `,
     confirmButtonText: "Continuar"
   }).then(() => {
     if (!passed && !timeUp && attemptCount < maxAttempts) {
@@ -810,75 +910,116 @@ function openTeacherConfig(editMode) {
 
   return Swal.fire({
     title: editMode ? "Editar configuración del evaluativo" : "Configurar evaluativo",
+    width: 640,
     html: `
-      <div style="text-align:left;font-size:0.9rem">
-        <label>Nombre del docente:</label>
-        <input id="docNombre" class="swal2-input" placeholder="Nombre" value="${teacherConfig.nombreDocente || ""}">
-
-        <label>Apellido del docente:</label>
-        <input id="docApellido" class="swal2-input" placeholder="Apellido" value="${teacherConfig.apellidoDocente || ""}">
-
-        <label>Curso:</label>
-        <input id="docCurso" class="swal2-input" placeholder="Ej: 3°" value="${teacherConfig.curso || ""}">
-
-        <label>División:</label>
-        <input id="docDivision" class="swal2-input" placeholder="Ej: A" value="${teacherConfig.division || ""}">
-
-        <label>Cantidad de preguntas a mostrar:</label>
-        <input id="numPreguntas" type="number" class="swal2-input" min="1" placeholder="Ej: 15" value="${numPlaceholder}">
-
-        <label>Modo de cronómetro:</label>
-        <div class="timer-mode-row" style="margin-bottom:0.5rem;">
-          <label style="margin-right:0.5rem;">
-            <input type="radio" name="timerMode" value="up" ${mode === "up" ? "checked" : ""}>
-            Incremental (0 → ...)
-          </label>
-          <label>
-            <input type="radio" name="timerMode" value="down" ${mode === "down" ? "checked" : ""}>
-            Decremental (X min → 0)
-          </label>
+      <div class="form">
+        <div class="form-section">
+          <div class="form-section-title">👩‍🏫 Docente y curso</div>
+          <div class="form-grid">
+            <div class="field">
+              <label for="docNombre">Nombre</label>
+              <input id="docNombre" class="swal2-input" placeholder="Nombre" value="${escapeHtml(teacherConfig.nombreDocente)}">
+            </div>
+            <div class="field">
+              <label for="docApellido">Apellido</label>
+              <input id="docApellido" class="swal2-input" placeholder="Apellido" value="${escapeHtml(teacherConfig.apellidoDocente)}">
+            </div>
+            <div class="field">
+              <label for="docCurso">Curso</label>
+              <input id="docCurso" class="swal2-input" placeholder="Ej: 3°" value="${escapeHtml(teacherConfig.curso)}">
+            </div>
+            <div class="field">
+              <label for="docDivision">División</label>
+              <input id="docDivision" class="swal2-input" placeholder="Ej: A" value="${escapeHtml(teacherConfig.division)}">
+            </div>
+          </div>
         </div>
 
-        <label>Minutos para cronómetro decreciente:</label>
-        <input id="timerMinutes" type="number" class="swal2-input" min="1" placeholder="Ej: 40" value="${minutesVal}">
-
-        <label>Archivo TXT de preguntas:</label>
-        <input id="questionsFile" type="file" class="swal2-file" accept=".txt">
-
-        <div style="margin-top:0.4rem;font-size:0.8rem;">
-          <strong>Formato por pregunta:</strong><br>
-          ¿Pregunta?<br>
-          A) ...<br>B) ...<br>C) ...<br>D) ...<br>E) ...<br>ANSWER: C
+        <div class="form-section">
+          <div class="form-section-title">📝 Preguntas</div>
+          <div class="form-grid">
+            <div class="field full">
+              <label for="questionsFile">Archivo TXT de preguntas${
+                allQuestions.length ? ` <span class="field-help">(cargadas: ${allQuestions.length})</span>` : ""
+              }</label>
+              <input id="questionsFile" type="file" class="swal2-file" accept=".txt">
+            </div>
+            <div class="field">
+              <label for="numPreguntas">Cantidad a mostrar</label>
+              <input id="numPreguntas" type="number" class="swal2-input" min="1" placeholder="Todas" value="${numPlaceholder}">
+            </div>
+            <div class="field" style="justify-content:flex-end">
+              <button type="button" id="downloadExampleTxt" class="popup-btn">⬇ Descargar ejemplo TXT</button>
+            </div>
+            <div class="field full">
+              <details>
+                <summary class="field-help" style="cursor:pointer">Ver formato del archivo</summary>
+                <div class="format-box" style="margin-top:.4rem">¿Pregunta?
+A) ...
+B) ...
+C) ...
+D) ...
+E) ...
+ANSWER: C</div>
+              </details>
+            </div>
+          </div>
         </div>
 
-        <button type="button" id="downloadExampleTxt" style="
-          margin-top:0.6rem;
-          padding:6px 10px;
-          font-size:0.8rem;
-          border-radius:999px;
-          border:1px solid #ccc;
-          background:#f5f5f5;
-          cursor:pointer;
-        ">
-          Descargar ejemplo TXT (10 preguntas)
-        </button>
+        <div class="form-section">
+          <div class="form-section-title">⏱ Cronómetro</div>
+          <div class="segmented">
+            <label>
+              <input type="radio" name="timerMode" value="up" ${mode === "up" ? "checked" : ""}>
+              <strong>Incremental</strong>
+              <small>Cuenta desde 0, sin límite</small>
+            </label>
+            <label>
+              <input type="radio" name="timerMode" value="down" ${mode === "down" ? "checked" : ""}>
+              <strong>Cuenta regresiva</strong>
+              <small>Tiempo límite en minutos</small>
+            </label>
+          </div>
+          <div class="field" id="timerMinutesField" style="margin-top:.7rem">
+            <label for="timerMinutes">Minutos disponibles</label>
+            <input id="timerMinutes" type="number" class="swal2-input" min="1" placeholder="Ej: 40" value="${minutesVal}">
+          </div>
+        </div>
 
-        <div style="margin-top:0.8rem;font-size:0.8rem;">
-          <strong>Usuario y contraseña de administrador (para próximos accesos):</strong>
-          <input id="adminUser" class="swal2-input" placeholder="Usuario admin" value="${adminCreds.user}">
-          <input id="adminPass" class="swal2-input" placeholder="Contraseña admin" type="password" value="${adminCreds.pass}">
+        <div class="form-section">
+          <div class="form-section-title">🔒 Acceso de administrador</div>
+          <div class="form-grid">
+            <div class="field">
+              <label for="adminUser">Usuario</label>
+              <input id="adminUser" class="swal2-input" placeholder="Usuario admin" value="${escapeHtml(adminCreds.user)}">
+            </div>
+            <div class="field">
+              <label for="adminPass">Contraseña</label>
+              <input id="adminPass" class="swal2-input" placeholder="Contraseña admin" type="password" value="${escapeHtml(adminCreds.pass)}">
+            </div>
+          </div>
+          <div class="field-help" style="margin-top:.5rem">Se pide al tocar ⚙ para editar la configuración.</div>
         </div>
       </div>
     `,
     focusConfirm: false,
     showCancelButton: true,
-    confirmButtonText: "Guardar configuración",
+    confirmButtonText: "Guardar y continuar",
     cancelButtonText: "Cancelar",
     didOpen: () => {
       const btn = document.getElementById("downloadExampleTxt");
       if (btn) {
         btn.addEventListener("click", downloadExampleTxt);
       }
+      const minutesField = document.getElementById("timerMinutesField");
+      const syncMinutes = () => {
+        const sel = document.querySelector('input[name="timerMode"]:checked');
+        if (minutesField) minutesField.style.display = sel && sel.value === "down" ? "" : "none";
+      };
+      document
+        .querySelectorAll('input[name="timerMode"]')
+        .forEach(r => r.addEventListener("change", syncMinutes));
+      syncMinutes();
     },
     preConfirm: () => {
       const nombre = document.getElementById("docNombre").value.trim();
@@ -1014,12 +1155,20 @@ function openTeacherConfig(editMode) {
 /************* LOGIN ADMIN PARA EDITAR CONFIG *************/
 function promptAdminLoginAndEdit() {
   Swal.fire({
-    title: "Acceso configuración",
+    title: "Acceso docente",
     html: `
-      <input id="loginUser" class="swal2-input" placeholder="Usuario">
-      <div class="password-wrapper">
-        <input id="loginPass" class="swal2-input" placeholder="Contraseña" type="password">
-        <button type="button" id="toggleLoginPass" class="eye-btn">👁️</button>
+      <div class="form">
+        <div class="field">
+          <label for="loginUser">Usuario</label>
+          <input id="loginUser" class="swal2-input" placeholder="Usuario" autocomplete="username">
+        </div>
+        <div class="field">
+          <label for="loginPass">Contraseña</label>
+          <div class="password-wrapper">
+            <input id="loginPass" class="swal2-input" placeholder="Contraseña" type="password" autocomplete="current-password">
+            <button type="button" id="toggleLoginPass" class="eye-btn" aria-label="Mostrar contraseña">👁️</button>
+          </div>
+        </div>
       </div>
     `,
     focusConfirm: false,
@@ -1027,6 +1176,7 @@ function promptAdminLoginAndEdit() {
     confirmButtonText: "Ingresar",
     cancelButtonText: "Cancelar",
     didOpen: () => {
+      document.getElementById("loginUser")?.focus();
       const passInput = document.getElementById("loginPass");
       const toggleBtn = document.getElementById("toggleLoginPass");
       if (passInput && toggleBtn) {
@@ -1069,14 +1219,30 @@ function promptAdminLoginAndEdit() {
 /************* DATOS DEL ALUMNO *************/
 function askStudentData() {
   return Swal.fire({
-    title: "Datos del alumno",
+    title: "¡Hola! ¿Quién juega?",
     html: `
-      <input id="alumNombre" class="swal2-input" placeholder="Nombre">
-      <input id="alumApellido" class="swal2-input" placeholder="Apellido">
+      <div class="form">
+        <div class="form-grid">
+          <div class="field">
+            <label for="alumNombre">Nombre</label>
+            <input id="alumNombre" class="swal2-input" placeholder="Ej: Sofía" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="alumApellido">Apellido</label>
+            <input id="alumApellido" class="swal2-input" placeholder="Ej: Gómez" autocomplete="off">
+          </div>
+        </div>
+        <div class="field-help">${teacherConfig.numQuestions || allQuestions.length} preguntas · ${
+          teacherConfig.timerMode === "down"
+            ? `tenés ${teacherConfig.timerMinutes} minutos`
+            : "sin límite de tiempo"
+        } · aprobás con ${passingGrade}/10</div>
+      </div>
     `,
+    didOpen: () => document.getElementById("alumNombre")?.focus(),
     focusConfirm: false,
     showCancelButton: true,
-    confirmButtonText: "Comenzar test",
+    confirmButtonText: "¡Empezar!",
     cancelButtonText: "Cancelar",
     preConfirm: () => {
       const nombre = document.getElementById("alumNombre").value.trim();
@@ -1102,6 +1268,7 @@ function beginQuizForCurrentStudent() {
   currentQuestionIndex = 0;
   correctCount = 0;
   quizInProgress = true;
+  setAppState("running");
   loadQuestion();
   startTimer();
 }
@@ -1145,30 +1312,41 @@ function showResultsPopup() {
   });
 
   let rows = "";
-  sorted.forEach(r => {
+  sorted.forEach((r, i) => {
+    const pos = i + 1;
+    const pass = r.grade >= passingGrade;
     rows += `
       <tr>
-        <td>${r.studentApellido}, ${r.studentNombre}</td>
-        <td>${r.curso}</td>
-        <td>${r.division}</td>
-        <td>${r.grade}</td>
-        <td>${formatTime(r.totalSeconds)}</td>
-        <td>${r.stars || ""}</td>
+        <td class="num"><span class="rank ${pos <= 3 ? "rank-" + pos : ""}">${pos}</span></td>
+        <td><strong>${escapeHtml(r.studentApellido)}</strong>, ${escapeHtml(r.studentNombre)}</td>
+        <td class="num">${escapeHtml(r.curso)} ${escapeHtml(r.division)}</td>
+        <td class="num"><span class="grade ${pass ? "pass" : "fail"}">${r.grade}</span></td>
+        <td class="num">${formatTime(r.totalSeconds)}</td>
+        <td class="stars">${r.stars || "—"}</td>
       </tr>
     `;
   });
 
+  const total = results.length;
+  const avg = results.reduce((acc, r) => acc + (Number(r.grade) || 0), 0) / total;
+  const passedCount = results.filter(r => r.grade >= passingGrade).length;
+
   const html = `
-    <div style="max-height:300px;overflow:auto;">
-      <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
+    <div class="stats">
+      <div class="stat"><b>${total}</b><span>Intentos</span></div>
+      <div class="stat"><b>${avg.toFixed(1)}</b><span>Promedio</span></div>
+      <div class="stat"><b>${Math.round((passedCount / total) * 100)}%</b><span>Aprobados</span></div>
+    </div>
+    <div class="table-wrap">
+      <table class="results-table">
         <thead>
           <tr>
-            <th style="border-bottom:1px solid #ccc;padding:4px;text-align:left;">Alumno</th>
-            <th style="border-bottom:1px solid #ccc;padding:4px;">Curso</th>
-            <th style="border-bottom:1px solid #ccc;padding:4px;">División</th>
-            <th style="border-bottom:1px solid #ccc;padding:4px;">Nota</th>
-            <th style="border-bottom:1px solid #ccc;padding:4px;">Tiempo</th>
-            <th style="border-bottom:1px solid #ccc;padding:4px;">Ranking (★)</th>
+            <th class="num">#</th>
+            <th>Alumno</th>
+            <th class="num">Curso</th>
+            <th class="num">Nota</th>
+            <th class="num">Tiempo</th>
+            <th>Ranking</th>
           </tr>
         </thead>
         <tbody>
@@ -1177,25 +1355,25 @@ function showResultsPopup() {
       </table>
     </div>
     <div class="popup-actions">
+      <button id="btnPopupClear" class="popup-btn danger" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M9 3h6l1 2h4v2H4V5h4l1-2zm-3 6h12l-1 12H7L6 9z"></path>
+        </svg>
+        <span>Borrar resultados</span>
+      </button>
       <button id="btnPopupExport" class="popup-btn" type="button">
         <svg viewBox="0 0 16 16" aria-hidden="true">
           <path d="M8 1v8.2L5.2 6.4 4.1 7.5 8 11.4l3.9-3.9-1.1-1.1L8 9.2V1zM2 13h12v2H2z"></path>
         </svg>
         <span>Descargar Excel</span>
       </button>
-      <button id="btnPopupClear" class="popup-btn" type="button">
-        <svg viewBox="0 0 16 16" aria-hidden="true">
-          <path d="M2 8l6-5 6 5v6H9V9H7v5H2z"></path>
-        </svg>
-        <span>Borrar resultados</span>
-      </button>
     </div>
   `;
 
   Swal.fire({
-    title: "Resultados de alumnos",
+    title: "🏆 Ranking de alumnos",
     html,
-    width: 700,
+    width: 760,
     confirmButtonText: "Cerrar",
     didOpen: () => {
       const btnExport = document.getElementById("btnPopupExport");
@@ -1411,6 +1589,7 @@ function handleHardwareButton(code) {
     if (pendingConfirmOption !== null && Swal.isVisible()) {
       pendingConfirmOption = null;
       Swal.close();
+      clearOptionMarks();
     }
     return;
   }
@@ -1461,10 +1640,11 @@ function startHardwarePolling() {
 }
 
 /************* INICIALIZACIÓN *************/
-function initApp() {
-  selectModeAtStartup();
-
+async function initApp() {
   loadSavedTheme();
+  setAppState("idle");
+  await selectModeAtStartup();
+
   loadAdminFromStorage();
   loadConfigFromStorage();
   loadResultsFromStorage();
@@ -1489,7 +1669,7 @@ function initApp() {
     const qText = document.getElementById("question-text");
     if (qNum && qText) {
       qNum.textContent = "";
-      qText.textContent = "Presiona Start para comenzar el evaluativo.";
+      qText.textContent = "Presioná Comenzar para iniciar el evaluativo.";
     }
     document.getElementById("timer").textContent = "00:00";
     document.getElementById("progress-text").textContent =
