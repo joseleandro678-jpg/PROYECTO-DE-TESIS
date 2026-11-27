@@ -279,26 +279,41 @@ static void pollButtons() {
 // =====================================================
 // DIAGNÓSTICO: detecta botones conectados a pines no asignados
 // =====================================================
-static const uint8_t SCAN_PINS[] = { 2, 5, 12, 13, 15, 18, 19, 21, 22, 23 };
+// 0 = botón BOOT de la placa; 34-39 = solo entrada, sin pull-up interno
+static const uint8_t SCAN_PINS[] = { 0, 2, 5, 12, 13, 15, 18, 19, 21, 22, 23, 34, 35, 36, 39 };
 static bool scanLast[sizeof(SCAN_PINS)];
+static bool diag17Last = LOW;
 
 static void scanInit() {
   for (size_t i = 0; i < sizeof(SCAN_PINS); i++) {
-    pinMode(SCAN_PINS[i], INPUT_PULLUP);
+    pinMode(SCAN_PINS[i], INPUT_PULLUP);   // en 34-39 se ignora (no tienen pull-up)
     scanLast[i] = digitalRead(SCAN_PINS[i]);
   }
+  // Prueba ACEPTAR cableado a 3.3V: pull-down en GPIO17 => apretado = HIGH
+  pinMode(PIN_BTN_ACCEPT, INPUT_PULLDOWN);
+  delay(5);
+  diag17Last = digitalRead(PIN_BTN_ACCEPT);
+  for (auto &b : btns) if (b.pin == PIN_BTN_ACCEPT) { b.stable = b.lastRead = diag17Last; }
+  Serial.printf("[DIAG] Estado inicial: GPIO17=%d | 34=%d 35=%d 36=%d 39=%d\n",
+                diag17Last, digitalRead(34), digitalRead(35), digitalRead(36), digitalRead(39));
 }
 
 static void scanPoll() {
   static uint32_t last = 0;
-  if (millis() - last < 30) return;
+  if (millis() - last < 50) return;
   last = millis();
   for (size_t i = 0; i < sizeof(SCAN_PINS); i++) {
     bool r = digitalRead(SCAN_PINS[i]);
     if (r != scanLast[i]) {
       scanLast[i] = r;
-      if (r == LOW) Serial.printf("[SCAN] Boton detectado en GPIO %u (no asignado)\n", SCAN_PINS[i]);
+      Serial.printf("[SCAN] GPIO %u cambio a %s\n", SCAN_PINS[i], r ? "HIGH" : "LOW");
     }
+  }
+  bool r17 = digitalRead(PIN_BTN_ACCEPT);
+  if (r17 != diag17Last) {
+    diag17Last = r17;
+    Serial.printf("[DIAG] GPIO17 (pull-down) cambio a %s%s\n", r17 ? "HIGH" : "LOW",
+                  r17 ? "  <- ACEPTAR cableado a 3.3V" : "");
   }
 }
 
